@@ -429,3 +429,63 @@ queries the app runs, not blanket coverage.
 SELECT id, title, summary, createdAt
 FROM notifications
 WHERE notificationType
+
+-----------------------------------------------------
+-----------------------------------------------------
+
+# Stage 4
+
+## Fixing the Repeated DB Hits
+
+### The problem
+Right now, every time a student opens the app, we go straight to the
+database to fetch notifications. If 10,000 students open the app
+around the same time (like after a placement result), that's 10,000
+near-identical queries hitting the DB at once — even though most of
+them are asking for the exact same data. That's why it's getting
+overwhelmed.
+
+### My solution: Caching
+
+The key insight is that the *list of latest notifications* is the
+same for every student — only their individual read/unread status
+differs. So instead of hitting the database every time, I'd cache the
+notifications list in a fast in-memory store like **Redis**.
+
+**How it would work:**
+1. When a student requests notifications, first check Redis.
+2. If it's there (cache hit), return it instantly — no DB needed.
+3. If not (cache miss), fetch from the DB once, save it in Redis, then
+   return it.
+4. When a new notification is created, clear/update the cache so
+   students don't see stale data.
+
+This way, the database only gets hit once per new notification, not
+once per student per page load.
+
+### Other things I'd add
+- **Pagination** — don't fetch all notifications at once, just the
+  first 20 or so, loading more as the student scrolls. Less data
+  moved per request.
+- **Client-side caching** — the frontend can also hold onto the last
+  fetched list briefly, so switching tabs and coming back doesn't
+  trigger a fresh fetch immediately.
+- **Rate limiting** — a basic safety net so one broken frontend loop
+  can't spam the API rapidly and overwhelm things.
+
+### Tradeoffs of caching
+- **Pro:** Massively reduces DB load, much faster responses for
+  students.
+- **Con:** Data can be slightly stale — if the cache isn't refreshed
+  fast enough, a student might not see a brand-new notification for a
+  few seconds. For this app that's a fine tradeoff, since a few
+  seconds of delay doesn't really hurt anyone.
+- **Con:** Adds a new moving part (Redis) to maintain and keep in sync
+  with the database — more infrastructure to manage than just querying
+  the DB directly.
+
+### Why not just make the DB itself faster?
+That's also worth doing (indexes, like in Stage 3), but it only helps
+so much — even a fast query run 10,000 times a second will eventually
+hit a wall. Caching fixes the actual root problem: the same data being
+asked for over and over shouldn't need to be recomputed every time.
