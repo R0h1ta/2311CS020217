@@ -370,3 +370,62 @@ more than it looks — a student double-tapping a notification, or a flaky
 network causing a retry, shouldn't cause an error or a duplicate row.
 Making that operation naturally idempotent means the frontend doesn't
 need extra guard logic either.
+-----------------------------------------------------
+-----------------------------------------------------
+
+
+
+# Stage 3
+
+## Query Performance Analysis
+
+### Is the query accurate?
+Yes, it returns the correct result — all unread notifications for
+student 1042. The issue isn't correctness, it's speed.
+
+```sql
+SELECT * FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt ASC;
+```
+
+### Why is it slow?
+With 5 million rows, there's no index on `studentID`/`isRead`, so
+Postgres has to scan the *entire* table row by row to find matches,
+instead of jumping straight to them. `SELECT *` also pulls every
+column (including large ones like `body`), and sorting happens after
+the scan with no index to help. Basically, the query is doing far more
+work than it needs to.
+
+### What I'd change
+Add a composite index on the columns actually used in the query:
+```sql
+CREATE INDEX idx_notifications_student_unread
+ON notifications (studentID, isRead, createdAt);
+```
+And select only needed columns instead of `SELECT *`:
+```sql
+SELECT id, title, summary, notificationType, createdAt
+FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt ASC;
+```
+
+**Cost impact:** Without the index, this query slows down as the
+*whole table* grows. With the index, it only scales with *that one
+student's* unread count, which stays small no matter how big the
+table gets — that's the real fix.
+
+### Is "index every column" good advice?
+No. Indexes speed up reads but slow down writes, since every
+`INSERT`/`UPDATE` has to update all of them. Since this app writes new
+notifications constantly, indexing every column would hurt write
+performance for little benefit — most columns are never even filtered
+on. The better approach is targeted indexes matching the actual
+queries the app runs, not blanket coverage.
+
+### Query: placement notifications in the last 7 days
+```sql
+SELECT id, title, summary, createdAt
+FROM notifications
+WHERE notificationType
